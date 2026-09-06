@@ -1,5 +1,8 @@
 import { useState } from "react";
+import CodeBlock from "./components/CodeBlock";
+import HeadingBlock from "./components/HeadingBlock";
 import ParagraphBlock from "./components/ParagraphBlock";
+import SectionBlock from "./components/SectionBlock";
 import "./App.css";
 
 function App() {
@@ -30,7 +33,7 @@ function App() {
               onClick={() => setSelectedDocument("Untitled Document")}
             >
               <span className="document-title">Untitled Document</span>
-              <span className="document-meta">No content yet</span>
+              <span className="document-meta">Sample document</span>
             </button>
           </div>
         </aside>
@@ -43,7 +46,17 @@ function App() {
           <div className="document-content">
             <h2>{selectedDocument}</h2>
 
+            <SectionBlock content="Introduction" />
+
+            <HeadingBlock content="SyncDoc Editor Foundations" />
+
             <ParagraphBlock content="This is the first paragraph block in SyncDoc." />
+
+            <CodeBlock content={`const document = "SyncDoc";`} />
+
+            <SectionBlock content="Document Structure" />
+
+            <ParagraphBlock content="SyncDoc represents documents as structured blocks that can later be connected to the AST model." />
           </div>
         </section>
       </main>
