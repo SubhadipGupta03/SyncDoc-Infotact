@@ -15,7 +15,9 @@
   "dependencies": {
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "mongoose": "^9.9.4"
+    "mongoose": "^9.9.4",
+    "ws": "^8.21.3",
+    "yjs": "^13.6.32"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
