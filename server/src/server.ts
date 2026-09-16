@@ -1,4 +1,11 @@
-import express, { type Express, type Request, type Response } from "express";
+import express, {
+  type Express,
+  type Request,
+  type Response,
+} from "express";
+import { createServer } from "node:http";
+import { WebSocketServer } from "ws";
+import { handleWebSocketConnection } from "./collaboration/websocketSync.js";
 
 const app: Express = express();
 
@@ -10,6 +17,34 @@ app.get("/", (req: Request, res: Response) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`SyncDoc server running on http://localhost:${PORT}`);
+const httpServer = createServer(app);
+
+const webSocketServer = new WebSocketServer({
+  server: httpServer,
+  path: "/ws",
+});
+
+webSocketServer.on("connection", (socket, request) => {
+  const requestUrl = new URL(
+    request.url ?? "/",
+    `http://${request.headers.host ?? "localhost"}`,
+  );
+
+  const documentId = requestUrl.searchParams.get("documentId");
+
+  if (!documentId) {
+    socket.close(1008, "documentId is required");
+    return;
+  }
+
+  handleWebSocketConnection(socket, documentId);
+});
+
+httpServer.listen(PORT, () => {
+  console.log(
+    `SyncDoc server running on http://localhost:${PORT}`,
+  );
+  console.log(
+    `SyncDoc WebSocket server running on ws://localhost:${PORT}/ws`,
+  );
 });
