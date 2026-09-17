@@ -1,8 +1,9 @@
-﻿import { useState } from "react";
+﻿import { useEffect, useState } from "react";
 import CodeBlock from "./components/CodeBlock";
 import HeadingBlock from "./components/HeadingBlock";
 import ParagraphBlock from "./components/ParagraphBlock";
 import SectionBlock from "./components/SectionBlock";
+import { connectToDocument } from "./collaboration/yjsClient";
 import "./App.css";
 
 type Block =
@@ -74,10 +75,13 @@ function renderBlock(block: Block) {
   switch (block.type) {
     case "section":
       return <SectionBlock content={block.content} />;
+
     case "heading":
       return <HeadingBlock content={block.content} />;
+
     case "paragraph":
       return <ParagraphBlock content={block.content} />;
+
     case "code":
       return <CodeBlock content={block.content} />;
   }
@@ -85,6 +89,58 @@ function renderBlock(block: Block) {
 
 function App() {
   const [selectedDocument, setSelectedDocument] = useState(documents[0]);
+
+  useEffect(() => {
+    const collaboration = connectToDocument(selectedDocument.title);
+    const sharedContent = collaboration.sharedContent;
+
+    const storedDocument = sharedContent.get("document");
+
+    if (!storedDocument) {
+      sharedContent.set(
+        "document",
+        JSON.stringify(selectedDocument),
+      );
+    }
+
+    const handleSharedContentChange = (): void => {
+      const updatedDocument = sharedContent.get("document");
+
+      if (!updatedDocument) {
+        return;
+      }
+
+      try {
+        const parsedDocument: unknown = JSON.parse(updatedDocument);
+
+        if (
+          typeof parsedDocument === "object" &&
+          parsedDocument !== null &&
+          "title" in parsedDocument &&
+          "meta" in parsedDocument &&
+          "blocks" in parsedDocument &&
+          typeof parsedDocument.title === "string" &&
+          typeof parsedDocument.meta === "string" &&
+          Array.isArray(parsedDocument.blocks)
+        ) {
+          setSelectedDocument(
+            parsedDocument as DocumentData,
+          );
+        }
+      } catch {
+        console.error(
+          "SyncDoc received invalid shared document data.",
+        );
+      }
+    };
+
+    sharedContent.observe(handleSharedContentChange);
+
+    return () => {
+      sharedContent.unobserve(handleSharedContentChange);
+      collaboration.disconnect();
+    };
+  }, [selectedDocument.title]);
 
   return (
     <div className="syncdoc-app">
