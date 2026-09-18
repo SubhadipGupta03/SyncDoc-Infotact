@@ -3,7 +3,10 @@ import CodeBlock from "./components/CodeBlock";
 import HeadingBlock from "./components/HeadingBlock";
 import ParagraphBlock from "./components/ParagraphBlock";
 import SectionBlock from "./components/SectionBlock";
-import { connectToDocument } from "./collaboration/yjsClient";
+import {
+  connectToDocument,
+  type PresenceUser,
+} from "./collaboration/yjsClient";
 import "./App.css";
 
 type Block =
@@ -89,10 +92,19 @@ function renderBlock(block: Block) {
 
 function App() {
   const [selectedDocument, setSelectedDocument] = useState(documents[0]);
+  const [presenceUsers, setPresenceUsers] = useState<PresenceUser[]>(
+    [],
+  );
 
   useEffect(() => {
     const collaboration = connectToDocument(selectedDocument.title);
     const sharedContent = collaboration.sharedContent;
+
+    const unsubscribePresence = collaboration.onPresenceChange(
+      (users) => {
+        setPresenceUsers(users);
+      },
+    );
 
     const storedDocument = sharedContent.get("document");
 
@@ -137,6 +149,7 @@ function App() {
     sharedContent.observe(handleSharedContentChange);
 
     return () => {
+      unsubscribePresence();
       sharedContent.unobserve(handleSharedContentChange);
       collaboration.disconnect();
     };
@@ -148,6 +161,83 @@ function App() {
         <div>
           <h1>SyncDoc</h1>
           <p>Collaborative Document Engine</p>
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+            flexWrap: "wrap",
+            justifyContent: "flex-end",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              fontSize: "13px",
+              color: "#166534",
+              fontWeight: 600,
+            }}
+          >
+            <span
+              style={{
+                width: "8px",
+                height: "8px",
+                borderRadius: "50%",
+                backgroundColor: "#22c55e",
+              }}
+            />
+            {presenceUsers.length} online
+          </div>
+
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "4px",
+            }}
+            aria-label="Connected users"
+          >
+            {presenceUsers.slice(0, 5).map((user) => (
+              <span
+                key={user.id}
+                title={user.name}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  width: "28px",
+                  height: "28px",
+                  borderRadius: "50%",
+                  backgroundColor: "#dbeafe",
+                  color: "#1e40af",
+                  fontSize: "11px",
+                  fontWeight: 700,
+                  border: "2px solid white",
+                }}
+              >
+                {user.name
+                  .replace("User ", "")
+                  .slice(0, 2)
+                  .toUpperCase()}
+              </span>
+            ))}
+
+            {presenceUsers.length > 5 && (
+              <span
+                style={{
+                  fontSize: "12px",
+                  color: "#64748b",
+                  marginLeft: "4px",
+                }}
+              >
+                +{presenceUsers.length - 5}
+              </span>
+            )}
+          </div>
         </div>
       </header>
 

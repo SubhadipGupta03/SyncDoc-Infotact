@@ -3,10 +3,20 @@ import * as Y from "yjs";
 const STATE_VECTOR_MESSAGE = 0;
 const UPDATE_MESSAGE = 1;
 
+export interface PresenceUser {
+  id: string;
+  name: string;
+}
+
+export type PresenceListener = (users: PresenceUser[]) => void;
+
 export interface YjsConnection {
   document: Y.Doc;
   sharedContent: Y.Map<string>;
   socket: WebSocket;
+  onPresenceChange: (
+    listener: PresenceListener,
+  ) => () => void;
   disconnect: () => void;
 }
 
@@ -23,12 +33,31 @@ const createYjsMessage = (
   return message;
 };
 
+const isPresenceUser = (
+  value: unknown,
+): value is PresenceUser => {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+
+  if (!("id" in value) || !("name" in value)) {
+    return false;
+  }
+
+  return (
+    typeof value.id === "string" &&
+    typeof value.name === "string"
+  );
+};
+
 export const connectToDocument = (
   documentId: string,
 ): YjsConnection => {
   const document = new Y.Doc();
 
   const sharedContent = document.getMap<string>("syncdoc");
+
+  const presenceListeners = new Set<PresenceListener>();
 
   const socket = new WebSocket(
     `ws://localhost:5000/ws?documentId=${encodeURIComponent(documentId)}`,
@@ -44,7 +73,10 @@ export const connectToDocument = (
     const stateVector = Y.encodeStateVector(document);
 
     socket.send(
-      createYjsMessage(STATE_VECTOR_MESSAGE, stateVector),
+      createYjsMessage(
+        STATE_VECTOR_MESSAGE,
+        stateVector,
+      ),
     );
   });
 
@@ -56,12 +88,28 @@ export const connectToDocument = (
         if (
           typeof message === "object" &&
           message !== null &&
-          "type" in message &&
-          message.type === "sync-ready"
+          "type" in message
         ) {
-          console.log(
-            `SyncDoc Yjs synchronization ready for document: ${documentId}`,
-          );
+          if (message.type === "sync-ready") {
+            console.log(
+              `SyncDoc Yjs synchronization ready for document: ${documentId}`,
+            );
+            return;
+          }
+
+          if (
+            message.type === "presence-update" &&
+            "users" in message &&
+            Array.isArray(message.users)
+          ) {
+            const users = message.users.filter(
+              isPresenceUser,
+            );
+
+            for (const listener of presenceListeners) {
+              listener(users);
+            }
+          }
         }
       } catch {
         console.error(
@@ -89,18 +137,24 @@ export const connectToDocument = (
     }
   });
 
-  document.on("update", (update: Uint8Array, origin: unknown) => {
-    if (
-      origin === socket ||
-      socket.readyState !== WebSocket.OPEN
-    ) {
-      return;
-    }
+  document.on(
+    "update",
+    (update: Uint8Array, origin: unknown) => {
+      if (
+        origin === socket ||
+        socket.readyState !== WebSocket.OPEN
+      ) {
+        return;
+      }
 
-    socket.send(
-      createYjsMessage(UPDATE_MESSAGE, update),
-    );
-  });
+      socket.send(
+        createYjsMessage(
+          UPDATE_MESSAGE,
+          update,
+        ),
+      );
+    },
+  );
 
   socket.addEventListener("error", () => {
     console.error(
@@ -112,7 +166,21 @@ export const connectToDocument = (
     console.log(
       `SyncDoc WebSocket closed for document: ${documentId}`,
     );
+
+    for (const listener of presenceListeners) {
+      listener([]);
+    }
   });
+
+  const onPresenceChange = (
+    listener: PresenceListener,
+  ): (() => void) => {
+    presenceListeners.add(listener);
+
+    return () => {
+      presenceListeners.delete(listener);
+    };
+  };
 
   const disconnect = (): void => {
     document.destroy();
@@ -123,12 +191,15 @@ export const connectToDocument = (
     ) {
       socket.close();
     }
+
+    presenceListeners.clear();
   };
 
   return {
     document,
     sharedContent,
     socket,
+    onPresenceChange,
     disconnect,
   };
 };

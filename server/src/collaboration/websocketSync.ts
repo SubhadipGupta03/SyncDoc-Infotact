@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as Y from "yjs";
 import type { RawData, WebSocket } from "ws";
 import { getYDoc } from "./yjsDocumentManager.js";
@@ -5,7 +6,18 @@ import { getYDoc } from "./yjsDocumentManager.js";
 const STATE_VECTOR_MESSAGE = 0;
 const UPDATE_MESSAGE = 1;
 
+interface PresenceUser {
+  id: string;
+  name: string;
+}
+
+interface PresenceMessage {
+  type: "presence-update";
+  users: PresenceUser[];
+}
+
 const documentClients = new Map<string, Set<WebSocket>>();
+const clientPresence = new Map<WebSocket, PresenceUser>();
 
 const toUint8Array = (data: RawData): Uint8Array => {
   if (data instanceof ArrayBuffer) {
@@ -32,6 +44,37 @@ const sendYjsMessage = (
   socket.send(message);
 };
 
+const broadcastPresence = (documentId: string): void => {
+  const clients = documentClients.get(documentId);
+
+  if (!clients) {
+    return;
+  }
+
+  const users: PresenceUser[] = [];
+
+  for (const client of clients) {
+    const presence = clientPresence.get(client);
+
+    if (presence) {
+      users.push(presence);
+    }
+  }
+
+  const message: PresenceMessage = {
+    type: "presence-update",
+    users,
+  };
+
+  const serializedMessage = JSON.stringify(message);
+
+  for (const client of clients) {
+    if (client.readyState === client.OPEN) {
+      client.send(serializedMessage);
+    }
+  }
+};
+
 export const handleWebSocketConnection = (
   socket: WebSocket,
   documentId: string,
@@ -47,6 +90,13 @@ export const handleWebSocketConnection = (
 
   clients.add(socket);
 
+  const clientId = randomUUID();
+
+  clientPresence.set(socket, {
+    id: clientId,
+    name: `User ${clientId.slice(0, 4)}`,
+  });
+
   socket.send(
     JSON.stringify({
       type: "sync-ready",
@@ -54,6 +104,8 @@ export const handleWebSocketConnection = (
       stateSize: Y.encodeStateAsUpdate(document).byteLength,
     }),
   );
+
+  broadcastPresence(documentId);
 
   const handleDocumentUpdate = (
     update: Uint8Array,
@@ -70,7 +122,10 @@ export const handleWebSocketConnection = (
     }
 
     for (const client of connectedClients) {
-      if (client !== socket && client.readyState === client.OPEN) {
+      if (
+        client !== socket &&
+        client.readyState === client.OPEN
+      ) {
         sendYjsMessage(client, UPDATE_MESSAGE, update);
       }
     }
@@ -105,6 +160,8 @@ export const handleWebSocketConnection = (
 
     const connectedClients = documentClients.get(documentId);
 
+    clientPresence.delete(socket);
+
     if (!connectedClients) {
       return;
     }
@@ -113,6 +170,9 @@ export const handleWebSocketConnection = (
 
     if (connectedClients.size === 0) {
       documentClients.delete(documentId);
+      return;
     }
+
+    broadcastPresence(documentId);
   });
 };
