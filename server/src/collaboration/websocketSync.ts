@@ -587,11 +587,18 @@ export const handleWebSocketConnection = (
         messageType ===
         UPDATE_MESSAGE
       ) {
+        console.log(
+          `[SyncDoc] Yjs update received for document: ${documentId}, bytes: ${payload.byteLength}`,
+    ); 
         Y.applyUpdate(
           document,
           payload,
           socket,
         );
+        console.log(
+    `[SyncDoc] Yjs update applied for document: ${documentId}`,
+  );
+
       }
     },
   );

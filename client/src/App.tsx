@@ -26,6 +26,12 @@ type Block = {
   content: string;
 };
 
+type BlockSelectionState = {
+  cursorPosition: number;
+  selectionStart: number;
+  selectionEnd: number;
+};
+
 interface DocumentData {
   title: string;
   meta: string;
@@ -234,6 +240,9 @@ function App() {
   const [localDrafts, setLocalDrafts] =
     useState<Record<string, string>>({});
 
+  const [blockSelectionState, setBlockSelectionState] =
+    useState<Record<string, BlockSelectionState>>({});
+  void blockSelectionState;
   const [lockMessage, setLockMessage] =
     useState<string | null>(null);
 
@@ -382,6 +391,9 @@ function App() {
 
     const handleSharedBlockChange =
       (): void => {
+        console.log(
+      "[SyncDoc] Shared block change received",
+    );
         /*
          * Do not replace the block currently
          * being edited from an incoming network
@@ -756,6 +768,27 @@ function App() {
       startEditing(block);
     };
 
+    const updateSelectionState = (
+  textarea: HTMLTextAreaElement,
+): void => {
+  const selectionStart =
+    textarea.selectionStart ?? 0;
+
+  const selectionEnd =
+    textarea.selectionEnd ?? selectionStart;
+
+  setBlockSelectionState(
+    (currentState) => ({
+      ...currentState,
+      [block.id]: {
+        cursorPosition: selectionEnd,
+        selectionStart,
+        selectionEnd,
+      },
+    }),
+  );
+};
+
     const handleInput = (
       event: React.ChangeEvent<
         HTMLTextAreaElement
@@ -835,12 +868,16 @@ function App() {
             <textarea
               value={displayContent}
               onChange={handleInput}
+              onSelect={(event) => {
+                updateSelectionState(event.currentTarget);
+}}
               onKeyDown={(event) => {
                 if (
                   event.key ===
                   "Escape"
                 ) {
                   event.preventDefault();
+                  console.log("Escape pressed");
                   finishEditing(
                     block.id,
                   );

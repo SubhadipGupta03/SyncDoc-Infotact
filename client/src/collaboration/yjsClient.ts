@@ -427,14 +427,21 @@ export const connectToDocument = (
         messageType ===
         UPDATE_MESSAGE
       ) {
+        console.log(
+    `[SyncDoc] Yjs update received from server, bytes: ${payload.byteLength}`,
+  );
         Y.applyUpdate(
           document,
           payload,
           socket,
         );
+        console.log(
+    "[SyncDoc] Yjs update applied to local document",
+  );
       }
     },
   );
+  
 
   /*
    * Every local Yjs change is sent to
