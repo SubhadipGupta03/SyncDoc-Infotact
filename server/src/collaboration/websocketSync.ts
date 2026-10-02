@@ -407,9 +407,16 @@ export const handleWebSocketConnection = (
   socket: WebSocket,
   documentId: string,
 ): void => {
+  /*
+   * Get the single authoritative Yjs document
+   * for this documentId.
+   */
   const document =
     getYDoc(documentId);
 
+  /*
+   * Register this WebSocket client.
+   */
   let clients =
     documentClients.get(documentId);
 
@@ -424,6 +431,9 @@ export const handleWebSocketConnection = (
 
   clients.add(socket);
 
+  /*
+   * Create presence identity.
+   */
   const clientId = randomUUID();
 
   const presence: PresenceUser = {
@@ -439,6 +449,10 @@ export const handleWebSocketConnection = (
     presence,
   );
 
+  /*
+   * Tell the browser that the connection
+   * and current Yjs document are ready.
+   */
   sendJsonMessage(socket, {
     type: "sync-ready",
     documentId,
@@ -458,42 +472,25 @@ export const handleWebSocketConnection = (
     documentId,
   );
 
-  const handleDocumentUpdate = (
-    update: Uint8Array,
-    origin: unknown,
-  ): void => {
-    if (origin !== socket) {
-      return;
-    }
-
-    const connectedClients =
-      documentClients.get(
-        documentId,
-      );
-
-    if (!connectedClients) {
-      return;
-    }
-
-    for (const client of connectedClients) {
-      if (
-        client !== socket &&
-        client.readyState ===
-          client.OPEN
-      ) {
-        sendYjsMessage(
-          client,
-          UPDATE_MESSAGE,
-          update,
-        );
-      }
-    }
-  };
-
-  document.on(
-    "update",
-    handleDocumentUpdate,
-  );
+  /*
+   * IMPORTANT:
+   *
+   * There is intentionally NO document.on("update")
+   * broadcaster here.
+   *
+   * Updates are handled in exactly one place below:
+   *
+   * WebSocket message
+   *       ↓
+   * Y.applyUpdate()
+   *       ↓
+   * encode complete server state
+   *       ↓
+   * send complete state to other clients
+   *
+   * This prevents duplicate/conflicting broadcast
+   * paths.
+   */
 
   socket.on(
     "message",
@@ -502,12 +499,11 @@ export const handleWebSocketConnection = (
       isBinary: boolean,
     ) => {
       /*
-       * Text messages are used for:
-       * - lock-request
-       * - unlock-request
+       * --------------------------------------------------
+       * TEXT MESSAGES
+       * --------------------------------------------------
        *
-       * The isBinary flag is important because
-       * ws can provide text frames as Buffer data.
+       * Used for block lock/unlock messages.
        */
       if (!isBinary) {
         try {
@@ -536,18 +532,20 @@ export const handleWebSocketConnection = (
               documentId,
               message.blockId,
             );
+
+            return;
           }
         } catch {
-          // Ignore malformed JSON messages.
+          // Ignore malformed JSON.
         }
 
         return;
       }
 
       /*
-       * Binary messages are used for Yjs:
-       * - state vector requests
-       * - document updates
+       * --------------------------------------------------
+       * BINARY YJS MESSAGES
+       * --------------------------------------------------
        */
       const message =
         toUint8Array(data);
@@ -564,6 +562,15 @@ export const handleWebSocketConnection = (
       const payload =
         message.slice(1);
 
+      /*
+       * --------------------------------------------------
+       * STATE VECTOR REQUEST
+       * --------------------------------------------------
+       *
+       * Browser asks:
+       *
+       * "Give me the Yjs updates I am missing."
+       */
       if (
         messageType ===
         STATE_VECTOR_MESSAGE
@@ -574,6 +581,10 @@ export const handleWebSocketConnection = (
             payload,
           );
 
+        console.log(
+          `[SyncDoc] Sending state update to client: ${update.byteLength} bytes`,
+        );
+
         sendYjsMessage(
           socket,
           UPDATE_MESSAGE,
@@ -583,34 +594,143 @@ export const handleWebSocketConnection = (
         return;
       }
 
+      /*
+       * --------------------------------------------------
+       * YJS UPDATE FROM A CLIENT
+       * --------------------------------------------------
+       *
+       * This is the important section.
+       *
+       * Tab 1
+       *   ↓
+       * WebSocket
+       *   ↓
+       * Server
+       *   ↓
+       * Y.applyUpdate()
+       *   ↓
+       * Complete server state
+       *   ↓
+       * Tab 2
+       */
       if (
         messageType ===
         UPDATE_MESSAGE
       ) {
         console.log(
-          `[SyncDoc] Yjs update received for document: ${documentId}, bytes: ${payload.byteLength}`,
-    ); 
+          "[SyncDoc] =======================================",
+        );
+
+        console.log(
+          `[SyncDoc] UPDATE received from client ${presence.name}`,
+        );
+
+        console.log(
+          `[SyncDoc] Incoming update bytes: ${payload.byteLength}`,
+        );
+
+        /*
+         * Apply Tab 1's update to the authoritative
+         * server Yjs document.
+         */
         Y.applyUpdate(
           document,
           payload,
           socket,
         );
-        console.log(
-    `[SyncDoc] Yjs update applied for document: ${documentId}`,
-  );
+        const serverBlocks =
+    document.getMap<string>("blocks");
 
+      console.log(
+    "[SyncDoc] SERVER BLOCK AFTER APPLY:",
+      serverBlocks.get("untitled-code-1"),
+      );
+
+        /*
+         * Generate the COMPLETE current Yjs state.
+         *
+         * This is deliberately not just the incoming
+         * delta. Every other browser receives the full
+         * authoritative state.
+         */
+        const fullState =
+          Y.encodeStateAsUpdate(
+            document,
+          );
+
+        console.log(
+          `[SyncDoc] Complete server state: ${fullState.byteLength} bytes`,
+        );
+
+        /*
+         * Get every browser connected to this document.
+         */
+        const connectedClients =
+          documentClients.get(
+            documentId,
+          );
+
+        if (
+          connectedClients
+        ) {
+          for (
+            const client of
+              connectedClients
+          ) {
+            /*
+             * Do NOT send the update back to the
+             * browser that originally sent it.
+             */
+            if (
+              client === socket
+            ) {
+              continue;
+            }
+
+            if (
+              client.readyState !==
+              client.OPEN
+            ) {
+              continue;
+            }
+
+            /*
+             * Send the COMPLETE Yjs document state
+             * to the other browser.
+             */
+            sendYjsMessage(
+              client,
+              UPDATE_MESSAGE,
+              fullState,
+            );
+
+            console.log(
+              `[SyncDoc] COMPLETE STATE sent to another client, bytes: ${fullState.byteLength}`,
+            );
+          }
+        }
+
+        console.log(
+          `[SyncDoc] Server Yjs state successfully updated for document: ${documentId}`,
+        );
+
+        console.log(
+          "[SyncDoc] =======================================",
+        );
+
+        return;
       }
     },
   );
 
+  /*
+   * --------------------------------------------------
+   * SOCKET CLOSE
+   * --------------------------------------------------
+   */
   socket.on(
     "close",
     () => {
-      document.off(
-        "update",
-        handleDocumentUpdate,
-      );
-
       const connectedClients =
         documentClients.get(
           documentId,
@@ -621,9 +741,7 @@ export const handleWebSocketConnection = (
       );
 
       /*
-       * If the user disconnects while
-       * holding any block locks, release
-       * those locks for the remaining users.
+       * Release all locks owned by this user.
        */
       releaseClientLocks(
         documentId,
@@ -638,6 +756,9 @@ export const handleWebSocketConnection = (
         socket,
       );
 
+      /*
+       * No clients remain.
+       */
       if (
         connectedClients.size ===
         0
@@ -653,6 +774,10 @@ export const handleWebSocketConnection = (
         return;
       }
 
+      /*
+       * Notify remaining browsers that this
+       * user disconnected.
+       */
       broadcastPresence(
         documentId,
       );

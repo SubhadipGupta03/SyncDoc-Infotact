@@ -3,15 +3,18 @@
   useRef,
   useState,
 } from "react";
+
 import CodeBlock from "./components/CodeBlock";
 import HeadingBlock from "./components/HeadingBlock";
 import ParagraphBlock from "./components/ParagraphBlock";
 import SectionBlock from "./components/SectionBlock";
+
 import {
   connectToDocument,
   type BlockLock,
   type PresenceUser,
 } from "./collaboration/yjsClient";
+
 import "./App.css";
 
 type BlockType =
@@ -85,6 +88,7 @@ const documents: DocumentData[] = [
       ),
     ],
   },
+
   {
     title: "AST Architecture",
     meta: "Structure overview",
@@ -111,6 +115,7 @@ const documents: DocumentData[] = [
       ),
     ],
   },
+
   {
     title: "SyncDoc Notes",
     meta: "Project notes",
@@ -241,10 +246,27 @@ function App() {
     useState<Record<string, string>>({});
 
   const [blockSelectionState, setBlockSelectionState] =
-    useState<Record<string, BlockSelectionState>>({});
+    useState<
+      Record<string, BlockSelectionState>
+    >({});
+
   void blockSelectionState;
+
   const [lockMessage, setLockMessage] =
     useState<string | null>(null);
+
+  /*
+   * Keeps the latest block state available
+   * synchronously.
+   *
+   * React state updates are asynchronous, so Yjs
+   * callbacks should use this ref instead of relying
+   * on selectedDocument.blocks.
+   */
+  const blocksRef =
+    useRef<Block[]>(
+      documents[0].blocks,
+    );
 
   const collaborationRef =
     useRef<
@@ -257,16 +279,35 @@ function App() {
   const editingBlockIdRef =
     useRef<string | null>(null);
 
+  /*
+   * Keep blocksRef synchronized with React state.
+   */
+  useEffect(() => {
+    blocksRef.current =
+      selectedDocument.blocks;
+  }, [selectedDocument.blocks]);
+
+  /*
+   * Keep localDraftsRef synchronized with state.
+   */
   useEffect(() => {
     localDraftsRef.current =
       localDrafts;
   }, [localDrafts]);
 
+  /*
+   * Keep editingBlockIdRef synchronized with state.
+   */
   useEffect(() => {
     editingBlockIdRef.current =
       editingBlockId;
   }, [editingBlockId]);
 
+  /*
+   * =====================================================
+   * COLLABORATION SETUP
+   * =====================================================
+   */
   useEffect(() => {
     const collaboration =
       connectToDocument(
@@ -282,6 +323,9 @@ function App() {
     const sharedBlocks =
       collaboration.sharedBlocks;
 
+    /*
+     * Presence
+     */
     const unsubscribePresence =
       collaboration.onPresenceChange(
         (users) => {
@@ -289,6 +333,9 @@ function App() {
         },
       );
 
+    /*
+     * Block locks
+     */
     const unsubscribeLocks =
       collaboration.onBlockLockChange(
         (locks) => {
@@ -296,6 +343,9 @@ function App() {
         },
       );
 
+    /*
+     * Lock denied
+     */
     const unsubscribeLockDenied =
       collaboration.onBlockLockDenied(
         (blockId, owner) => {
@@ -316,97 +366,85 @@ function App() {
       );
 
     /*
-     * Keep the original document-level
-     * shared content for compatibility.
-     */
-    const storedDocument =
-      sharedContent.get("document");
-
-    if (!storedDocument) {
-      sharedContent.set(
-        "document",
-        JSON.stringify(
-          selectedDocument,
-        ),
-      );
-    }
-
-    /*
-     * Initialize individual Yjs block entries.
-     *
-     * Every block is stored independently,
-     * allowing incoming network deltas to affect
-     * only the block that actually changed.
-     */
-    if (sharedBlocks.size === 0) {
-      for (
-        const block of selectedDocument.blocks
-      ) {
-        sharedBlocks.set(
-          block.id,
-          JSON.stringify(block),
-        );
-      }
-    }
-
-    /*
-     * Read any blocks already present in the
-     * collaborative Yjs document.
+     * =====================================================
+     * LOAD SHARED BLOCKS
+     * =====================================================
      */
     const loadSharedBlocks = (): void => {
-      const remoteBlocks: Block[] = [];
-
-      for (
-        const block of selectedDocument.blocks
-      ) {
-        const sharedBlock =
-          sharedBlocks.get(block.id);
-
-        if (!sharedBlock) {
-          remoteBlocks.push(block);
-          continue;
-        }
-
-        const parsedBlock =
-          parseBlock(sharedBlock);
-
-        if (parsedBlock) {
-          remoteBlocks.push(
-            parsedBlock,
-          );
-        } else {
-          remoteBlocks.push(block);
-        }
-      }
-
       setSelectedDocument(
-        (currentDocument) => ({
-          ...currentDocument,
-          blocks: remoteBlocks,
-        }),
+        (currentDocument) => {
+          const updatedBlocks =
+            blocksRef.current.map(
+              (block) => {
+                const sharedBlock =
+                  sharedBlocks.get(
+                    block.id,
+                  );
+
+                if (!sharedBlock) {
+                  return block;
+                }
+
+                const parsedBlock =
+                  parseBlock(
+                    sharedBlock,
+                  );
+
+                return (
+                  parsedBlock ??
+                  block
+                );
+              },
+            );
+
+          /*
+           * IMPORTANT:
+           * Update the ref immediately.
+           */
+          blocksRef.current =
+            updatedBlocks;
+
+          return {
+            ...currentDocument,
+            blocks: updatedBlocks,
+          };
+        },
       );
     };
 
-    loadSharedBlocks();
-
+    /*
+     * =====================================================
+     * HANDLE REMOTE BLOCK CHANGES
+     * =====================================================
+     */
     const handleSharedBlockChange =
       (): void => {
         console.log(
-      "[SyncDoc] Shared block change received",
-    );
-        /*
-         * Do not replace the block currently
-         * being edited from an incoming network
-         * delta. The local draft remains visible.
-         */
+          "[SyncDoc] ===== SHARED BLOCK CHANGE =====",
+        );
+
         const activeBlockId =
           editingBlockIdRef.current;
 
+        console.log(
+          "[SyncDoc] Active editing block:",
+          activeBlockId,
+        );
+
         setSelectedDocument(
           (currentDocument) => {
+            /*
+             * IMPORTANT:
+             * Use blocksRef instead of the potentially
+             * stale currentDocument.blocks.
+             */
             const updatedBlocks =
-              currentDocument.blocks.map(
+              blocksRef.current.map(
                 (block) => {
+                  /*
+                   * Never overwrite the block currently
+                   * being edited locally.
+                   */
                   if (
                     block.id ===
                     activeBlockId
@@ -428,12 +466,30 @@ function App() {
                       sharedBlock,
                     );
 
-                  return (
-                    parsedBlock ??
-                    block
+                  if (!parsedBlock) {
+                    console.error(
+                      "[SyncDoc] Failed to parse Yjs block:",
+                      sharedBlock,
+                    );
+
+                    return block;
+                  }
+
+                  console.log(
+                    "[SyncDoc] Updating React block:",
+                    parsedBlock,
                   );
+
+                  return parsedBlock;
                 },
               );
+
+            /*
+             * IMPORTANT:
+             * Keep blocksRef immediately synchronized.
+             */
+            blocksRef.current =
+              updatedBlocks;
 
             return {
               ...currentDocument,
@@ -443,10 +499,18 @@ function App() {
         );
       };
 
+    /*
+     * Observe Yjs block changes.
+     */
     sharedBlocks.observe(
       handleSharedBlockChange,
     );
 
+    /*
+     * =====================================================
+     * HANDLE SHARED DOCUMENT METADATA
+     * =====================================================
+     */
     const handleSharedContentChange =
       (): void => {
         const updatedDocument =
@@ -470,13 +534,21 @@ function App() {
             )
           ) {
             setSelectedDocument(
-              (currentDocument) => ({
-                ...currentDocument,
-                title:
-                  parsedDocument.title,
-                meta:
-                  parsedDocument.meta,
-              }),
+              (currentDocument) => {
+                /*
+                 * Keep current blocks untouched.
+                 */
+                blocksRef.current =
+                  currentDocument.blocks;
+
+                return {
+                  ...currentDocument,
+                  title:
+                    parsedDocument.title,
+                  meta:
+                    parsedDocument.meta,
+                };
+              },
             );
           }
         } catch {
@@ -490,10 +562,90 @@ function App() {
       handleSharedContentChange,
     );
 
+    /*
+     * =====================================================
+     * INITIAL YJS SYNCHRONIZATION
+     * =====================================================
+     */
+    const unsubscribeSyncComplete =
+      collaboration.onSyncComplete(
+        () => {
+          console.log(
+            "[SyncDoc] Initial Yjs synchronization completed.",
+          );
+
+          console.log(
+            "[SyncDoc] Shared block count after sync:",
+            sharedBlocks.size,
+          );
+
+          /*
+           * If server already has blocks,
+           * use server state.
+           */
+          if (
+            sharedBlocks.size > 0
+          ) {
+            console.log(
+              "[SyncDoc] Existing shared blocks found. Loading server state.",
+            );
+
+            loadSharedBlocks();
+
+            return;
+          }
+
+          /*
+           * No shared blocks exist.
+           * Initialize Yjs using the current ref.
+           */
+          console.log(
+            "[SyncDoc] No shared blocks found. Initializing Yjs document.",
+          );
+
+          for (
+            const block of
+              blocksRef.current
+          ) {
+            sharedBlocks.set(
+              block.id,
+              JSON.stringify(block),
+            );
+          }
+
+          /*
+           * Initialize metadata only if
+           * it does not already exist.
+           */
+          if (
+            !sharedContent.get(
+              "document",
+            )
+          ) {
+            sharedContent.set(
+              "document",
+              JSON.stringify({
+                ...selectedDocument,
+                blocks:
+                  blocksRef.current,
+              }),
+            );
+          }
+
+          loadSharedBlocks();
+        },
+      );
+
+    /*
+     * =====================================================
+     * CLEANUP
+     * =====================================================
+     */
     return () => {
       unsubscribePresence();
       unsubscribeLocks();
       unsubscribeLockDenied();
+      unsubscribeSyncComplete();
 
       sharedBlocks.unobserve(
         handleSharedBlockChange,
@@ -509,12 +661,26 @@ function App() {
         null;
 
       setBlockLocks([]);
+
       setEditingBlockId(null);
+
+      editingBlockIdRef.current =
+        null;
+
       setLocalDrafts({});
+
+      localDraftsRef.current =
+        {};
+
       setLockMessage(null);
     };
   }, [selectedDocument.title]);
 
+  /*
+   * =====================================================
+   * GET BLOCK LOCK
+   * =====================================================
+   */
   const getBlockLock = (
     blockId: string,
   ): BlockLock | undefined => {
@@ -524,6 +690,11 @@ function App() {
     );
   };
 
+  /*
+   * =====================================================
+   * CHECK OWN LOCK
+   * =====================================================
+   */
   const isOwnLock = (
     blockId: string,
   ): boolean => {
@@ -542,6 +713,11 @@ function App() {
     );
   };
 
+  /*
+   * =====================================================
+   * START EDITING
+   * =====================================================
+   */
   const startEditing = (
     block: Block,
   ): void => {
@@ -567,38 +743,63 @@ function App() {
 
     setLockMessage(null);
 
+    /*
+     * Create local draft.
+     */
     setLocalDrafts(
-      (currentDrafts) => ({
-        ...currentDrafts,
-        [block.id]: block.content,
-      }),
+      (currentDrafts) => {
+        const updatedDrafts = {
+          ...currentDrafts,
+          [block.id]:
+            block.content,
+        };
+
+        localDraftsRef.current =
+          updatedDrafts;
+
+        return updatedDrafts;
+      },
     );
 
-    localDraftsRef.current = {
-      ...localDraftsRef.current,
-      [block.id]: block.content,
-    };
-
-    setEditingBlockId(block.id);
+    /*
+     * Start editing.
+     */
+    setEditingBlockId(
+      block.id,
+    );
 
     editingBlockIdRef.current =
       block.id;
 
+    /*
+     * Request Yjs lock.
+     */
     collaborationRef.current?.requestBlockLock(
       block.id,
     );
   };
 
+  /*
+   * =====================================================
+   * UPDATE LOCAL DRAFT
+   * =====================================================
+   */
   const updateLocalDraft = (
     blockId: string,
     content: string,
   ): void => {
+    /*
+     * Do not allow editing without the lock.
+     */
     if (
       !isOwnLock(blockId)
     ) {
       return;
     }
 
+    /*
+     * Update draft state.
+     */
     setLocalDrafts(
       (currentDrafts) => {
         const updatedDrafts = {
@@ -613,25 +814,74 @@ function App() {
       },
     );
 
+    /*
+     * =====================================================
+     * CRITICAL FIX
+     * =====================================================
+     *
+     * Use blocksRef.current instead of
+     * selectedDocument.blocks.
+     *
+     * This guarantees that we modify the latest
+     * block even if React has not rendered the
+     * previous state update yet.
+     */
+    const currentBlock =
+      blocksRef.current.find(
+        (block) =>
+          block.id === blockId,
+      );
+
+    if (!currentBlock) {
+      return;
+    }
+
+    /*
+     * Immediately update the ref.
+     */
+    const updatedBlock: Block = {
+      ...currentBlock,
+      content,
+    };
+
+    blocksRef.current =
+      blocksRef.current.map(
+        (block) =>
+          block.id === blockId
+            ? updatedBlock
+            : block,
+      );
+
+    /*
+     * Also update React state.
+     */
     setSelectedDocument(
-      (currentDocument) => ({
-        ...currentDocument,
-        blocks:
+      (currentDocument) => {
+        const updatedBlocks =
           currentDocument.blocks.map(
             (block) =>
               block.id === blockId
-                ? {
-                    ...block,
-                    content,
-                  }
+                ? updatedBlock
                 : block,
-          ),
-      }),
+          );
+
+        /*
+         * Keep ref synchronized.
+         */
+        blocksRef.current =
+          updatedBlocks;
+
+        return {
+          ...currentDocument,
+          blocks: updatedBlocks,
+        };
+      },
     );
 
     /*
-     * Send only this block through Yjs.
-     * Other blocks remain untouched.
+     * =====================================================
+     * SEND ONLY THIS BLOCK TO YJS
+     * =====================================================
      */
     const sharedBlocks =
       collaborationRef.current
@@ -641,20 +891,10 @@ function App() {
       return;
     }
 
-    const currentBlock =
-      selectedDocument.blocks.find(
-        (block) =>
-          block.id === blockId,
-      );
-
-    if (!currentBlock) {
-      return;
-    }
-
-    const updatedBlock: Block = {
-      ...currentBlock,
-      content,
-    };
+    console.log(
+      "[SyncDoc] Sending block to Yjs:",
+      updatedBlock,
+    );
 
     sharedBlocks.set(
       blockId,
@@ -664,6 +904,11 @@ function App() {
     );
   };
 
+  /*
+   * =====================================================
+   * FINISH EDITING
+   * =====================================================
+   */
   const finishEditing = (
     blockId: string,
   ): void => {
@@ -682,15 +927,20 @@ function App() {
         blockId
       ];
 
+    /*
+     * IMPORTANT:
+     *
+     * Always read the latest block from
+     * blocksRef.current.
+     */
     const currentBlock =
-      selectedDocument.blocks.find(
+      blocksRef.current.find(
         (block) =>
           block.id === blockId,
       );
 
     /*
-     * Commit the final local value before
-     * releasing the block lock.
+     * Commit the final local value.
      */
     if (
       sharedBlocks &&
@@ -702,6 +952,45 @@ function App() {
         content: draft,
       };
 
+      /*
+       * Update ref too.
+       */
+      blocksRef.current =
+        blocksRef.current.map(
+          (block) =>
+            block.id === blockId
+              ? updatedBlock
+              : block,
+        );
+
+      /*
+       * Update React state.
+       */
+      setSelectedDocument(
+        (currentDocument) => {
+          const updatedBlocks =
+            currentDocument.blocks.map(
+              (block) =>
+                block.id === blockId
+                  ? updatedBlock
+                  : block,
+            );
+
+          blocksRef.current =
+            updatedBlocks;
+
+          return {
+            ...currentDocument,
+            blocks: updatedBlocks,
+          };
+        },
+      );
+
+      console.log(
+        "[SyncDoc] Final block sent to Yjs:",
+        updatedBlock,
+      );
+
       sharedBlocks.set(
         blockId,
         JSON.stringify(
@@ -710,6 +999,9 @@ function App() {
       );
     }
 
+    /*
+     * Release Yjs lock.
+     */
     collaborationRef.current?.releaseBlockLock(
       blockId,
     );
@@ -719,6 +1011,9 @@ function App() {
     editingBlockIdRef.current =
       null;
 
+    /*
+     * Remove local draft.
+     */
     setLocalDrafts(
       (currentDrafts) => {
         const nextDrafts = {
@@ -737,6 +1032,11 @@ function App() {
     );
   };
 
+  /*
+   * =====================================================
+   * RENDER BLOCK
+   * =====================================================
+   */
   const renderBlock = (
     block: Block,
   ) => {
@@ -764,35 +1064,36 @@ function App() {
         ? localDrafts[block.id]
         : block.content;
 
-    const beginEditing = (): void => {
-      startEditing(block);
-    };
+    const beginEditing =
+      (): void => {
+        startEditing(block);
+      };
 
     const updateSelectionState = (
-  textarea: HTMLTextAreaElement,
-): void => {
-  const selectionStart =
-    textarea.selectionStart ?? 0;
+      textarea: HTMLTextAreaElement,
+    ): void => {
+      const selectionStart =
+        textarea.selectionStart ?? 0;
 
-  const selectionEnd =
-    textarea.selectionEnd ?? selectionStart;
+      const selectionEnd =
+        textarea.selectionEnd ??
+        selectionStart;
 
-  setBlockSelectionState(
-    (currentState) => ({
-      ...currentState,
-      [block.id]: {
-        cursorPosition: selectionEnd,
-        selectionStart,
-        selectionEnd,
-      },
-    }),
-  );
-};
+      setBlockSelectionState(
+        (currentState) => ({
+          ...currentState,
+          [block.id]: {
+            cursorPosition:
+              selectionEnd,
+            selectionStart,
+            selectionEnd,
+          },
+        }),
+      );
+    };
 
     const handleInput = (
-      event: React.ChangeEvent<
-        HTMLTextAreaElement
-      >,
+      event: React.ChangeEvent<HTMLTextAreaElement>,
     ): void => {
       updateLocalDraft(
         block.id,
@@ -869,15 +1170,21 @@ function App() {
               value={displayContent}
               onChange={handleInput}
               onSelect={(event) => {
-                updateSelectionState(event.currentTarget);
-}}
+                updateSelectionState(
+                  event.currentTarget,
+                );
+              }}
               onKeyDown={(event) => {
                 if (
                   event.key ===
                   "Escape"
                 ) {
                   event.preventDefault();
-                  console.log("Escape pressed");
+
+                  console.log(
+                    "Escape pressed",
+                  );
+
                   finishEditing(
                     block.id,
                   );
@@ -922,10 +1229,8 @@ function App() {
                 event,
               ) => {
                 /*
-                 * Keep the textarea from
-                 * losing focus before the
-                 * click handler releases
-                 * the lock.
+                 * Prevent textarea from losing
+                 * focus before the click handler.
                  */
                 event.preventDefault();
               }}
@@ -1011,7 +1316,8 @@ function App() {
               />
             )}
 
-            {block.type === "code" && (
+            {block.type ===
+              "code" && (
               <CodeBlock
                 content={
                   displayContent
@@ -1024,11 +1330,17 @@ function App() {
     );
   };
 
+  /*
+   * =====================================================
+   * RENDER APP
+   * =====================================================
+   */
   return (
     <div className="syncdoc-app">
       <header className="app-header">
         <div>
           <h1>SyncDoc</h1>
+
           <p>
             Collaborative Document Engine
           </p>
@@ -1168,15 +1480,40 @@ function App() {
                       : ""
                   }`}
                   onClick={() => {
+                    /*
+                     * Release local editing state.
+                     */
                     setEditingBlockId(
                       null,
                     );
+
+                    editingBlockIdRef.current =
+                      null;
+
                     setLocalDrafts(
                       {},
                     );
+
+                    localDraftsRef.current =
+                      {};
+
                     setLockMessage(
                       null,
                     );
+
+                    /*
+                     * =================================================
+                     * IMPORTANT:
+                     * Update blocksRef immediately when switching
+                     * documents.
+                     * =================================================
+                     */
+                    blocksRef.current =
+                      document.blocks;
+
+                    /*
+                     * Switch document.
+                     */
                     setSelectedDocument(
                       document,
                     );
@@ -1223,7 +1560,9 @@ function App() {
 
           <div className="document-content">
             <h2>
-              {selectedDocument.title}
+              {
+                selectedDocument.title
+              }
             </h2>
 
             {selectedDocument.blocks.map(

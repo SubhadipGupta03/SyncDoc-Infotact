@@ -34,6 +34,10 @@ export interface YjsConnection {
   socket: WebSocket;
   currentUser: PresenceUser | null;
 
+  onSyncComplete: (
+    listener: () => void,
+  ) => () => void;
+
   onPresenceChange: (
     listener: PresenceListener,
   ) => () => void;
@@ -124,6 +128,12 @@ const isBlockLock = (
 export const connectToDocument = (
   documentId: string,
 ): YjsConnection => {
+  /*
+   * =====================================================
+   * YJS DOCUMENT
+   * =====================================================
+   */
+
   const document = new Y.Doc();
 
   /*
@@ -133,19 +143,33 @@ export const connectToDocument = (
     document.getMap<string>("syncdoc");
 
   /*
-   * Each document block has its own Yjs entry.
+   * Each block is stored independently.
    *
-   * This allows incoming updates to affect
-   * only the block that changed.
+   * Example:
+   *
+   * blocks:
+   *   untitled-code-1
+   *   untitled-heading-1
+   *   untitled-paragraph-1
    */
+
   const sharedBlocks =
     document.getMap<string>("blocks");
+
+  /*
+   * =====================================================
+   * CLIENT STATE
+   * =====================================================
+   */
 
   const presenceListeners =
     new Set<PresenceListener>();
 
   const blockLockListeners =
     new Set<BlockLockListener>();
+
+  const syncCompleteListeners =
+    new Set<() => void>();
 
   const blockLockDeniedListeners =
     new Set<BlockLockDeniedListener>();
@@ -157,6 +181,17 @@ export const connectToDocument = (
     | PresenceUser
     | null = null;
 
+  /*
+   * Prevent sync-ready from firing more than once.
+   */
+  let syncCompleted = false;
+
+  /*
+   * =====================================================
+   * WEBSOCKET
+   * =====================================================
+   */
+
   const socket = new WebSocket(
     `ws://localhost:5000/ws?documentId=${encodeURIComponent(
       documentId,
@@ -166,27 +201,32 @@ export const connectToDocument = (
   socket.binaryType = "arraybuffer";
 
   /*
-   * Notify all listeners of the current
-   * block-lock state.
+   * =====================================================
+   * LOCK HELPERS
+   * =====================================================
    */
-  const notifyBlockLockListeners = (): void => {
-    const locks =
-      Array.from(
-        activeLocks.values(),
-      );
 
-    for (
-      const listener of
-      blockLockListeners
-    ) {
-      listener(locks);
-    }
-  };
+  const notifyBlockLockListeners =
+    (): void => {
+      const locks =
+        Array.from(
+          activeLocks.values(),
+        );
+
+      for (
+        const listener of
+        blockLockListeners
+      ) {
+        listener(locks);
+      }
+    };
 
   /*
-   * Process JSON messages received from
-   * the WebSocket server.
+   * =====================================================
+   * JSON MESSAGE HANDLER
+   * =====================================================
    */
+
   const handleJsonMessage = (
     message: unknown,
   ): void => {
@@ -199,8 +239,11 @@ export const connectToDocument = (
     }
 
     /*
-     * Initial synchronization response.
+     * ---------------------------------------------------
+     * SYNC READY
+     * ---------------------------------------------------
      */
+
     if (
       message.type ===
       "sync-ready"
@@ -213,20 +256,32 @@ export const connectToDocument = (
           message.user;
 
         console.log(
-          `SyncDoc connected as ${currentUser.name}`,
+          `[SyncDoc] Connected as ${currentUser.name}`,
         );
       }
 
       console.log(
-        `SyncDoc Yjs synchronization ready for document: ${documentId}`,
+        `[SyncDoc] Yjs synchronization ready for document: ${documentId}`,
       );
+
+      /*
+       * The server sends sync-ready before the
+       * state-vector response.
+       *
+       * Therefore we do NOT initialize local data here.
+       *
+       * We only record the user identity.
+       */
 
       return;
     }
 
     /*
-     * Presence update.
+     * ---------------------------------------------------
+     * PRESENCE
+     * ---------------------------------------------------
      */
+
     if (
       message.type ===
         "presence-update" &&
@@ -249,11 +304,11 @@ export const connectToDocument = (
     }
 
     /*
-     * Block lock update.
-     *
-     * This message is broadcast by the server
-     * to every connected client in the document.
+     * ---------------------------------------------------
+     * BLOCK LOCK UPDATE
+     * ---------------------------------------------------
      */
+
     if (
       message.type ===
         "block-lock-update" &&
@@ -262,6 +317,10 @@ export const connectToDocument = (
     ) {
       const lock =
         message.lock;
+
+      /*
+       * Lock released.
+       */
 
       if (
         "released" in message &&
@@ -272,16 +331,20 @@ export const connectToDocument = (
         );
 
         console.log(
-          `SyncDoc block lock released: ${lock.blockId}`,
+          `[SyncDoc] Block lock released: ${lock.blockId}`,
         );
       } else {
+        /*
+         * Lock acquired.
+         */
+
         activeLocks.set(
           lock.blockId,
           lock,
         );
 
         console.log(
-          `SyncDoc block locked: ${lock.blockId} by ${lock.userName}`,
+          `[SyncDoc] Block locked: ${lock.blockId} by ${lock.userName}`,
         );
       }
 
@@ -291,9 +354,11 @@ export const connectToDocument = (
     }
 
     /*
-     * Another user already owns the
-     * requested block lock.
+     * ---------------------------------------------------
+     * LOCK DENIED
+     * ---------------------------------------------------
      */
+
     if (
       message.type ===
         "block-lock-denied" &&
@@ -304,7 +369,7 @@ export const connectToDocument = (
       isBlockLock(message.owner)
     ) {
       console.log(
-        `SyncDoc block lock denied: ${message.blockId} is owned by ${message.owner.userName}`,
+        `[SyncDoc] Block lock denied: ${message.blockId} is owned by ${message.owner.userName}`,
       );
 
       for (
@@ -321,15 +386,33 @@ export const connectToDocument = (
     }
   };
 
+  /*
+   * =====================================================
+   * WEBSOCKET OPEN
+   * =====================================================
+   */
+
   socket.addEventListener(
     "open",
     () => {
       console.log(
-        `SyncDoc WebSocket connected for document: ${documentId}`,
+        `[SyncDoc] WebSocket connected for document: ${documentId}`,
       );
 
+      /*
+       * Ask the server for the Yjs state
+       * that this browser does not have.
+       *
+       * IMPORTANT:
+       *
+       * This must happen BEFORE App.tsx initializes
+       * the local hard-coded blocks.
+       */
+
       const stateVector =
-        Y.encodeStateVector(document);
+        Y.encodeStateVector(
+          document,
+        );
 
       socket.send(
         createYjsMessage(
@@ -337,16 +420,28 @@ export const connectToDocument = (
           stateVector,
         ),
       );
+
+      console.log(
+        `[SyncDoc] State vector sent: ${stateVector.byteLength} bytes`,
+      );
     },
   );
+
+  /*
+   * =====================================================
+   * WEBSOCKET MESSAGE
+   * =====================================================
+   */
 
   socket.addEventListener(
     "message",
     (event) => {
       /*
-       * Normal WebSocket text frames are
-       * received as strings.
+       * --------------------------------------------------
+       * JSON MESSAGE
+       * --------------------------------------------------
        */
+
       if (
         typeof event.data ===
         "string"
@@ -360,7 +455,7 @@ export const connectToDocument = (
           );
         } catch {
           console.error(
-            "SyncDoc received invalid JSON WebSocket data.",
+            "[SyncDoc] Invalid JSON WebSocket data.",
           );
         }
 
@@ -368,33 +463,29 @@ export const connectToDocument = (
       }
 
       /*
-       * Some browser environments can expose
-       * non-binary WebSocket data as a Blob.
+       * --------------------------------------------------
+       * BLOB
+       * --------------------------------------------------
        *
-       * Handle that case as JSON as well.
+       * Normally Yjs data should arrive as ArrayBuffer
+       * because binaryType is arraybuffer.
+       *
+       * Blob support is kept for browser compatibility.
        */
+
       if (
         event.data instanceof Blob
       ) {
         event.data
-          .text()
-          .then((text) => {
-            try {
-              const message: unknown =
-                JSON.parse(text);
-
-              handleJsonMessage(
-                message,
-              );
-            } catch {
-              console.error(
-                "SyncDoc received invalid Blob JSON data.",
-              );
-            }
+          .arrayBuffer()
+          .then((buffer) => {
+            handleBinaryMessage(
+              new Uint8Array(buffer),
+            );
           })
           .catch(() => {
             console.error(
-              "SyncDoc could not read WebSocket Blob data.",
+              "[SyncDoc] Could not read WebSocket Blob data.",
             );
           });
 
@@ -402,68 +493,204 @@ export const connectToDocument = (
       }
 
       /*
-       * Binary messages are Yjs updates.
+       * --------------------------------------------------
+       * ARRAYBUFFER
+       * --------------------------------------------------
        */
-      const message =
-        event.data instanceof ArrayBuffer
-          ? new Uint8Array(
-              event.data,
-            )
-          : new Uint8Array();
 
       if (
-        message.byteLength === 0
+        event.data instanceof
+        ArrayBuffer
       ) {
+        handleBinaryMessage(
+          new Uint8Array(
+            event.data,
+          ),
+        );
+
         return;
       }
 
-      const messageType =
-        message[0];
-
-      const payload =
-        message.slice(1);
+      /*
+       * --------------------------------------------------
+       * UINT8ARRAY
+       * --------------------------------------------------
+       */
 
       if (
-        messageType ===
-        UPDATE_MESSAGE
+        event.data instanceof
+        Uint8Array
       ) {
-        console.log(
-    `[SyncDoc] Yjs update received from server, bytes: ${payload.byteLength}`,
-  );
-        Y.applyUpdate(
-          document,
-          payload,
-          socket,
+        handleBinaryMessage(
+          event.data,
         );
-        console.log(
-    "[SyncDoc] Yjs update applied to local document",
-  );
+
+        return;
       }
+
+      console.warn(
+        "[SyncDoc] Unknown WebSocket message type.",
+      );
     },
   );
-  
 
   /*
-   * Every local Yjs change is sent to
-   * the server.
-   *
-   * Updates received from the server use
-   * the WebSocket as their origin, so they
-   * are not sent back again.
+   * =====================================================
+   * BINARY YJS MESSAGE HANDLER
+   * =====================================================
    */
+
+  const handleBinaryMessage = (
+    message: Uint8Array,
+  ): void => {
+    if (
+      message.byteLength === 0
+    ) {
+      return;
+    }
+
+    const messageType =
+      message[0];
+
+    const payload =
+      message.slice(1);
+
+    /*
+     * --------------------------------------------------
+     * YJS UPDATE
+     * --------------------------------------------------
+     */
+
+    if (
+      messageType ===
+      UPDATE_MESSAGE
+    ) {
+      console.log(
+        "[SyncDoc] ===== INCOMING YJS UPDATE =====",
+      );
+
+      console.log(
+        "[SyncDoc] Incoming bytes:",
+        payload.byteLength,
+      );
+
+      /*
+       * Apply the update to the local Y.Doc.
+       *
+       * IMPORTANT:
+       *
+       * The origin is "remote-server".
+       *
+       * The document update listener below
+       * uses this origin to avoid sending
+       * the same update back to the server.
+       */
+
+      Y.applyUpdate(
+        document,
+        payload,
+        "remote-server",
+      );
+
+      console.log(
+        "[SyncDoc] Yjs update applied.",
+      );
+
+      console.log(
+        "[SyncDoc] Shared block count:",
+        sharedBlocks.size,
+      );
+
+      console.log(
+        "[SyncDoc] ALL BLOCKS:",
+        Array.from(
+          sharedBlocks.entries(),
+        ),
+      );
+
+      console.log(
+        "[SyncDoc] =============================",
+      );
+
+      /*
+       * The FIRST UPDATE received after the
+       * state-vector request represents the
+       * server's current state.
+       *
+       * Only after this state has been applied
+       * should App.tsx decide whether it needs
+       * to initialize the document.
+       */
+
+      if (!syncCompleted) {
+        syncCompleted = true;
+
+        console.log(
+          "[SyncDoc] Initial Yjs state received.",
+        );
+
+        for (
+          const listener of
+          syncCompleteListeners
+        ) {
+          listener();
+        }
+      }
+
+      return;
+    }
+
+    console.warn(
+      `[SyncDoc] Unknown binary message type: ${messageType}`,
+    );
+  };
+
+  /*
+   * =====================================================
+   * LOCAL YJS UPDATE → SERVER
+   * =====================================================
+   */
+
   document.on(
     "update",
     (
       update: Uint8Array,
       origin: unknown,
     ) => {
+      /*
+       * Ignore updates that came from the server.
+       *
+       * Server updates are applied using:
+       *
+       * Y.applyUpdate(
+       *   document,
+       *   payload,
+       *   "remote-server"
+       * )
+       */
+
       if (
-        origin === socket ||
-        socket.readyState !==
-          WebSocket.OPEN
+        origin ===
+        "remote-server"
       ) {
         return;
       }
+
+      /*
+       * Ignore updates while WebSocket
+       * is not connected.
+       */
+
+      if (
+        socket.readyState !==
+        WebSocket.OPEN
+      ) {
+        return;
+      }
+
+      console.log(
+        `[SyncDoc] Sending local Yjs update, bytes: ${update.byteLength}`,
+      );
 
       socket.send(
         createYjsMessage(
@@ -474,25 +701,43 @@ export const connectToDocument = (
     },
   );
 
+  /*
+   * =====================================================
+   * WEBSOCKET ERROR
+   * =====================================================
+   */
+
   socket.addEventListener(
     "error",
     () => {
       console.error(
-        `SyncDoc WebSocket error for document: ${documentId}`,
+        `[SyncDoc] WebSocket error for document: ${documentId}`,
       );
     },
   );
+
+  /*
+   * =====================================================
+   * WEBSOCKET CLOSE
+   * =====================================================
+   */
 
   socket.addEventListener(
     "close",
     () => {
       console.log(
-        `SyncDoc WebSocket closed for document: ${documentId}`,
+        `[SyncDoc] WebSocket closed for document: ${documentId}`,
       );
 
       currentUser = null;
 
       activeLocks.clear();
+
+      syncCompleted = false;
+
+      /*
+       * Notify React that everyone is offline.
+       */
 
       for (
         const listener of
@@ -500,6 +745,11 @@ export const connectToDocument = (
       ) {
         listener([]);
       }
+
+      /*
+       * Notify React that all locks
+       * are gone.
+       */
 
       for (
         const listener of
@@ -510,6 +760,12 @@ export const connectToDocument = (
     },
   );
 
+  /*
+   * =====================================================
+   * PRESENCE API
+   * =====================================================
+   */
+
   const onPresenceChange = (
     listener: PresenceListener,
   ): (() => void) => {
@@ -517,16 +773,18 @@ export const connectToDocument = (
       listener,
     );
 
-    /*
-     * Immediately provide the current
-     * presence state.
-     */
     return () => {
       presenceListeners.delete(
         listener,
       );
     };
   };
+
+  /*
+   * =====================================================
+   * BLOCK LOCK API
+   * =====================================================
+   */
 
   const onBlockLockChange = (
     listener: BlockLockListener,
@@ -536,9 +794,9 @@ export const connectToDocument = (
     );
 
     /*
-     * Immediately provide the current
-     * lock state.
+     * Immediately provide current locks.
      */
+
     listener(
       Array.from(
         activeLocks.values(),
@@ -566,6 +824,42 @@ export const connectToDocument = (
     };
   };
 
+  /*
+   * =====================================================
+   * INITIAL SYNC API
+   * =====================================================
+   */
+
+  const onSyncComplete = (
+    listener: () => void,
+  ): (() => void) => {
+    syncCompleteListeners.add(
+      listener,
+    );
+
+    /*
+     * If synchronization already completed
+     * before App.tsx registered the listener,
+     * immediately notify the listener.
+     */
+
+    if (syncCompleted) {
+      listener();
+    }
+
+    return () => {
+      syncCompleteListeners.delete(
+        listener,
+      );
+    };
+  };
+
+  /*
+   * =====================================================
+   * REQUEST BLOCK LOCK
+   * =====================================================
+   */
+
   const requestBlockLock = (
     blockId: string,
   ): void => {
@@ -578,7 +872,7 @@ export const connectToDocument = (
     }
 
     console.log(
-      `SyncDoc requesting block lock: ${blockId}`,
+      `[SyncDoc] Requesting block lock: ${blockId}`,
     );
 
     socket.send(
@@ -588,6 +882,12 @@ export const connectToDocument = (
       }),
     );
   };
+
+  /*
+   * =====================================================
+   * RELEASE BLOCK LOCK
+   * =====================================================
+   */
 
   const releaseBlockLock = (
     blockId: string,
@@ -601,7 +901,7 @@ export const connectToDocument = (
     }
 
     console.log(
-      `SyncDoc releasing block lock: ${blockId}`,
+      `[SyncDoc] Releasing block lock: ${blockId}`,
     );
 
     socket.send(
@@ -612,8 +912,22 @@ export const connectToDocument = (
     );
   };
 
+  /*
+   * =====================================================
+   * DISCONNECT
+   * =====================================================
+   */
+
   const disconnect = (): void => {
+    /*
+     * Destroy the local Yjs document.
+     */
+
     document.destroy();
+
+    /*
+     * Close WebSocket.
+     */
 
     if (
       socket.readyState ===
@@ -624,36 +938,59 @@ export const connectToDocument = (
       socket.close();
     }
 
+    /*
+     * Clear local listeners/state.
+     */
+
     presenceListeners.clear();
+
     blockLockListeners.clear();
+
     blockLockDeniedListeners.clear();
+
+    syncCompleteListeners.clear();
+
     activeLocks.clear();
 
     currentUser = null;
+
+    syncCompleted = false;
   };
+
+  /*
+   * =====================================================
+   * RETURN CONNECTION
+   * =====================================================
+   */
 
   return {
     document,
+
     sharedContent,
+
     sharedBlocks,
+
     socket,
 
+    onSyncComplete,
+
     /*
-     * IMPORTANT:
-     *
      * Getter keeps currentUser live.
-     * App.tsx therefore receives the latest
-     * user assigned by the server.
      */
-    get currentUser(): PresenceUser | null {
+
+    get currentUser():
+      PresenceUser | null {
       return currentUser;
     },
 
     onPresenceChange,
+
     onBlockLockChange,
+
     onBlockLockDenied,
 
     requestBlockLock,
+
     releaseBlockLock,
 
     disconnect,
