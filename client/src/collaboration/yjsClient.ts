@@ -7,7 +7,14 @@ export interface PresenceUser {
   id: string;
   name: string;
 }
-
+export interface BlockSelection {
+  blockId: string;
+  selectionStart: number;
+  selectionEnd: number;
+  cursorPosition: number;
+  userId: string;
+  userName: string;
+}
 export interface BlockLock {
   blockId: string;
   userId: string;
@@ -16,6 +23,10 @@ export interface BlockLock {
 
 export type PresenceListener = (
   users: PresenceUser[],
+) => void;
+
+export type BlockSelectionListener = (
+  selections: BlockSelection[],
 ) => void;
 
 export type BlockLockListener = (
@@ -41,6 +52,17 @@ export interface YjsConnection {
   onPresenceChange: (
     listener: PresenceListener,
   ) => () => void;
+
+  onBlockSelectionChange: (
+    listener: BlockSelectionListener,
+  ) => () => void;
+
+  sendBlockSelection: (
+    selection: Omit<
+      BlockSelection,
+      "userId" | "userName"
+    >,
+  ) => void;
 
   onBlockLockChange: (
     listener: BlockLockListener,
@@ -165,6 +187,9 @@ export const connectToDocument = (
   const presenceListeners =
     new Set<PresenceListener>();
 
+  const blockSelectionListeners =
+  new Set<BlockSelectionListener>();  
+
   const blockLockListeners =
     new Set<BlockLockListener>();
 
@@ -176,6 +201,9 @@ export const connectToDocument = (
 
   const activeLocks =
     new Map<string, BlockLock>();
+
+  const activeSelections =
+  new Map<string, BlockSelection>();  
 
   let currentUser:
     | PresenceUser
@@ -192,8 +220,13 @@ export const connectToDocument = (
    * =====================================================
    */
 
+  const websocketProtocol =
+    window.location.protocol === "https:"
+      ? "wss:"
+      : "ws:";
+
   const socket = new WebSocket(
-    `ws://localhost:5000/ws?documentId=${encodeURIComponent(
+    `${websocketProtocol}//${window.location.host}/ws?documentId=${encodeURIComponent(
       documentId,
     )}`,
   );
@@ -256,26 +289,30 @@ export const connectToDocument = (
           message.user;
 
         console.log(
-          `[SyncDoc] Connected as ${currentUser.name}`,
-        );
-      }
+      `[SyncDoc] Connected as ${currentUser.name}`,
+    );
+  }
 
-      console.log(
-        `[SyncDoc] Yjs synchronization ready for document: ${documentId}`,
-      );
+  console.log(
+    `[SyncDoc] Yjs synchronization ready for document: ${documentId}`,
+  );
 
-      /*
-       * The server sends sync-ready before the
-       * state-vector response.
-       *
-       * Therefore we do NOT initialize local data here.
-       *
-       * We only record the user identity.
-       */
+  const stateVector =
+    Y.encodeStateVector(document);
 
-      return;
-    }
+socket.send(
+    createYjsMessage(
+      STATE_VECTOR_MESSAGE,
+      stateVector,
+    ),
+  );
 
+  console.log(
+    `[SyncDoc] State vector sent: ${stateVector.byteLength} bytes`,
+  );
+
+  return;
+}
     /*
      * ---------------------------------------------------
      * PRESENCE
@@ -302,6 +339,77 @@ export const connectToDocument = (
 
       return;
     }
+
+    /*
+ * ---------------------------------------------------
+ * BLOCK SELECTION UPDATE
+ * ---------------------------------------------------
+ */
+
+if (
+  message.type ===
+    "block-selection-update" &&
+  "selections" in message &&
+  Array.isArray(message.selections)
+) {
+  const selections =
+    message.selections.filter(
+      (selection): selection is BlockSelection => {
+        if (
+          typeof selection !== "object" ||
+          selection === null
+        ) {
+          return false;
+        }
+
+        if (
+          !("blockId" in selection) ||
+          !("selectionStart" in selection) ||
+          !("selectionEnd" in selection) ||
+          !("cursorPosition" in selection) ||
+          !("userId" in selection) ||
+          !("userName" in selection)
+        ) {
+          return false;
+        }
+
+        return (
+          typeof selection.blockId ===
+            "string" &&
+          typeof selection.selectionStart ===
+            "number" &&
+          typeof selection.selectionEnd ===
+            "number" &&
+          typeof selection.cursorPosition ===
+            "number" &&
+          typeof selection.userId ===
+            "string" &&
+          typeof selection.userName ===
+            "string"
+        );
+      },
+    );
+
+  activeSelections.clear();
+
+  for (
+    const selection of selections
+  ) {
+    activeSelections.set(
+      selection.userId,
+      selection,
+    );
+  }
+
+  for (
+    const listener of
+      blockSelectionListeners
+  ) {
+    listener(selections);
+  }
+
+  return;
+}
 
     /*
      * ---------------------------------------------------
@@ -392,40 +500,7 @@ export const connectToDocument = (
    * =====================================================
    */
 
-  socket.addEventListener(
-    "open",
-    () => {
-      console.log(
-        `[SyncDoc] WebSocket connected for document: ${documentId}`,
-      );
-
-      /*
-       * Ask the server for the Yjs state
-       * that this browser does not have.
-       *
-       * IMPORTANT:
-       *
-       * This must happen BEFORE App.tsx initializes
-       * the local hard-coded blocks.
-       */
-
-      const stateVector =
-        Y.encodeStateVector(
-          document,
-        );
-
-      socket.send(
-        createYjsMessage(
-          STATE_VECTOR_MESSAGE,
-          stateVector,
-        ),
-      );
-
-      console.log(
-        `[SyncDoc] State vector sent: ${stateVector.byteLength} bytes`,
-      );
-    },
-  );
+  
 
   /*
    * =====================================================
@@ -565,14 +640,7 @@ export const connectToDocument = (
       messageType ===
       UPDATE_MESSAGE
     ) {
-      console.log(
-        "[SyncDoc] ===== INCOMING YJS UPDATE =====",
-      );
-
-      console.log(
-        "[SyncDoc] Incoming bytes:",
-        payload.byteLength,
-      );
+      
 
       /*
        * Apply the update to the local Y.Doc.
@@ -592,25 +660,7 @@ export const connectToDocument = (
         "remote-server",
       );
 
-      console.log(
-        "[SyncDoc] Yjs update applied.",
-      );
-
-      console.log(
-        "[SyncDoc] Shared block count:",
-        sharedBlocks.size,
-      );
-
-      console.log(
-        "[SyncDoc] ALL BLOCKS:",
-        Array.from(
-          sharedBlocks.entries(),
-        ),
-      );
-
-      console.log(
-        "[SyncDoc] =============================",
-      );
+      
 
       /*
        * The FIRST UPDATE received after the
@@ -625,9 +675,7 @@ export const connectToDocument = (
       if (!syncCompleted) {
         syncCompleted = true;
 
-        console.log(
-          "[SyncDoc] Initial Yjs state received.",
-        );
+        
 
         for (
           const listener of
@@ -654,20 +702,8 @@ export const connectToDocument = (
   document.on(
     "update",
     (
-      update: Uint8Array,
-      origin: unknown,
-    ) => {
-      /*
-       * Ignore updates that came from the server.
-       *
-       * Server updates are applied using:
-       *
-       * Y.applyUpdate(
-       *   document,
-       *   payload,
-       *   "remote-server"
-       * )
-       */
+      update: Uint8Array,origin: unknown,) => {
+
 
       if (
         origin ===
@@ -785,7 +821,50 @@ export const connectToDocument = (
    * BLOCK LOCK API
    * =====================================================
    */
+    const onBlockSelectionChange = (
+  listener: BlockSelectionListener,
+): (() => void) => {
+  blockSelectionListeners.add(
+    listener,
+  );
 
+  /*
+   * Immediately provide the current selections.
+   */
+  listener(
+    Array.from(
+      activeSelections.values(),
+    ),
+  );
+
+  return () => {
+    blockSelectionListeners.delete(
+      listener,
+    );
+  };
+};
+
+const sendBlockSelection = (
+  selection: Omit<
+    BlockSelection,
+    "userId" | "userName"
+  >,
+): void => {
+  if (
+    !selection.blockId ||
+    socket.readyState !== WebSocket.OPEN
+  ) {
+    return;
+  }
+
+  socket.send(
+    JSON.stringify({
+      type: "block-selection-update",
+      selection,
+    }),
+  );
+};
+  
   const onBlockLockChange = (
     listener: BlockLockListener,
   ): (() => void) => {
@@ -984,6 +1063,10 @@ export const connectToDocument = (
     },
 
     onPresenceChange,
+
+    onBlockSelectionChange,
+
+    sendBlockSelection,
 
     onBlockLockChange,
 

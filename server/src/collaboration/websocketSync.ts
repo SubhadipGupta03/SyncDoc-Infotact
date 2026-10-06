@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import * as Y from "yjs";
 import type { RawData, WebSocket } from "ws";
-import { getYDoc } from "./yjsDocumentManager.js";
+import {getYDoc,loadYDocFromDatabase,} from "./yjsDocumentManager.js";
+import YjsDocumentModel from "../models/yjsDocument.js";
 
 const STATE_VECTOR_MESSAGE = 0;
 const UPDATE_MESSAGE = 1;
@@ -14,6 +15,20 @@ interface PresenceUser {
 interface PresenceMessage {
   type: "presence-update";
   users: PresenceUser[];
+}
+
+interface BlockSelection {
+  blockId: string;
+  selectionStart: number;
+  selectionEnd: number;
+  cursorPosition: number;
+  userId: string;
+  userName: string;
+}
+
+interface BlockSelectionMessage {
+  type: "block-selection-update";
+  selection: BlockSelection;
 }
 
 interface BlockLock {
@@ -62,6 +77,11 @@ const clientPresence = new Map<
 const documentLocks = new Map<
   string,
   Map<string, BlockLock>
+>();
+
+const documentSelections = new Map<
+  string,
+  Map<string, BlockSelection>
 >();
 
 const toUint8Array = (
@@ -138,6 +158,34 @@ const broadcastPresence = (
     sendJsonMessage(client, message);
   }
 };
+const broadcastSelections = (
+  documentId: string,
+): void => {
+  const selections =
+    documentSelections.get(documentId);
+
+    const currentSelections = selections
+    ? Array.from(selections.values())
+    : [];
+
+  const clients =
+    documentClients.get(documentId);
+
+  if (!clients) {
+    return;
+  }
+  const message = {
+    type: "block-selection-update",
+    selections: currentSelections,
+  };
+
+  for (const client of clients) {
+    sendJsonMessage(
+      client,
+      message,
+    );
+  }
+};
 
 const sendCurrentLocks = (
   socket: WebSocket,
@@ -156,6 +204,26 @@ const sendCurrentLocks = (
       lock,
     } satisfies BlockLockMessage);
   }
+};
+const sendCurrentSelections = (
+  socket: WebSocket,
+  documentId: string,
+): void => {
+  const selections =
+    documentSelections.get(
+      documentId,
+    );
+
+  if (!selections) {
+    return;
+  }
+
+  sendJsonMessage(socket, {
+    type: "block-selection-update",
+    selections: Array.from(
+      selections.values(),
+    ),
+  });
 };
 
 const broadcastLock = (
@@ -339,6 +407,18 @@ const handleUnlockRequest = (
 
   locks.delete(blockId);
 
+  const selections = documentSelections.get(documentId);
+
+if (selections) {
+  selections.delete(presence.id);
+
+  if (selections.size === 0) {
+    documentSelections.delete(documentId);
+  }
+}
+
+broadcastSelections(documentId);
+
   broadcastUnlock(
     documentId,
     existingLock,
@@ -376,6 +456,60 @@ const isLockRequest = (
     message.blockId.length > 0
   );
 };
+const isBlockSelectionMessage = (
+  message: unknown,
+): message is BlockSelectionMessage => {
+  if (
+    typeof message !== "object" ||
+    message === null
+  ) {
+    return false;
+  }
+
+  if (
+    !("type" in message) ||
+    !("selection" in message)
+  ) {
+    return false;
+  }
+
+  if (
+    message.type !==
+    "block-selection-update"
+  ) {
+    return false;
+  }
+
+  const selection = message.selection;
+
+  if (
+    typeof selection !== "object" ||
+    selection === null
+  ) {
+    return false;
+  }
+
+  if (
+    !("blockId" in selection) ||
+    !("selectionStart" in selection) ||
+    !("selectionEnd" in selection) ||
+    !("cursorPosition" in selection)
+  ) {
+    return false;
+  }
+
+  return (
+    typeof selection.blockId ===
+      "string" &&
+    selection.blockId.length > 0 &&
+    typeof selection.selectionStart ===
+      "number" &&
+    typeof selection.selectionEnd ===
+      "number" &&
+    typeof selection.cursorPosition ===
+      "number"
+  );
+};
 
 const isUnlockRequest = (
   message: unknown,
@@ -403,16 +537,25 @@ const isUnlockRequest = (
   );
 };
 
-export const handleWebSocketConnection = (
+export const handleWebSocketConnection =  async (
+
   socket: WebSocket,
   documentId: string,
-): void => {
+):Promise<void> => {
+  
   /*
    * Get the single authoritative Yjs document
    * for this documentId.
    */
-  const document =
-    getYDoc(documentId);
+  
+  const document = getYDoc(documentId);
+  
+
+await loadYDocFromDatabase(
+  documentId,
+  document,
+);
+
 
   /*
    * Register this WebSocket client.
@@ -491,13 +634,15 @@ export const handleWebSocketConnection = (
    * This prevents duplicate/conflicting broadcast
    * paths.
    */
+  
 
   socket.on(
     "message",
-    (
+   async (
       data: RawData,
       isBinary: boolean,
     ) => {
+      
       /*
        * --------------------------------------------------
        * TEXT MESSAGES
@@ -523,6 +668,50 @@ export const handleWebSocketConnection = (
 
             return;
           }
+          if (
+  isBlockSelectionMessage(message)
+) {
+  const selection: BlockSelection = {
+    blockId:
+      message.selection.blockId,
+    selectionStart:
+      message.selection.selectionStart,
+    selectionEnd:
+      message.selection.selectionEnd,
+    cursorPosition:
+      message.selection.cursorPosition,
+    userId: presence.id,
+    userName: presence.name,
+  };
+
+  let selections =
+    documentSelections.get(
+      documentId,
+    );
+
+  if (!selections) {
+    selections = new Map<
+      string,
+      BlockSelection
+    >();
+
+    documentSelections.set(
+      documentId,
+      selections,
+    );
+  }
+
+  selections.set(
+    presence.id,
+    selection,
+  );
+
+  broadcastSelections(
+    documentId,
+  );
+
+  return;
+}
 
           if (
             isUnlockRequest(message)
@@ -547,8 +736,9 @@ export const handleWebSocketConnection = (
        * BINARY YJS MESSAGES
        * --------------------------------------------------
        */
-      const message =
-        toUint8Array(data);
+      const message = toUint8Array(data);
+      
+      
 
       if (
         message.byteLength === 0
@@ -575,15 +765,14 @@ export const handleWebSocketConnection = (
         messageType ===
         STATE_VECTOR_MESSAGE
       ) {
+        
         const update =
           Y.encodeStateAsUpdate(
             document,
             payload,
           );
 
-        console.log(
-          `[SyncDoc] Sending state update to client: ${update.byteLength} bytes`,
-        );
+        
 
         sendYjsMessage(
           socket,
@@ -621,13 +810,7 @@ export const handleWebSocketConnection = (
           "[SyncDoc] =======================================",
         );
 
-        console.log(
-          `[SyncDoc] UPDATE received from client ${presence.name}`,
-        );
-
-        console.log(
-          `[SyncDoc] Incoming update bytes: ${payload.byteLength}`,
-        );
+        
 
         /*
          * Apply Tab 1's update to the authoritative
@@ -638,29 +821,39 @@ export const handleWebSocketConnection = (
           payload,
           socket,
         );
-        const serverBlocks =
-    document.getMap<string>("blocks");
+  const serverBlocks =
+  document.getMap<string>("blocks");
 
-      console.log(
-    "[SyncDoc] SERVER BLOCK AFTER APPLY:",
-      serverBlocks.get("untitled-code-1"),
-      );
 
-        /*
-         * Generate the COMPLETE current Yjs state.
-         *
-         * This is deliberately not just the incoming
-         * delta. Every other browser receives the full
-         * authoritative state.
-         */
-        const fullState =
-          Y.encodeStateAsUpdate(
-            document,
-          );
 
-        console.log(
-          `[SyncDoc] Complete server state: ${fullState.byteLength} bytes`,
-        );
+/*
+ * Generate the COMPLETE current Yjs state.
+ */
+const fullState =
+  Y.encodeStateAsUpdate(
+    document,
+  );
+
+/*
+ * Persist the complete Yjs state
+ * to MongoDB.
+ */
+
+await YjsDocumentModel.findOneAndUpdate(
+  { documentId },
+  {
+    $set: {
+      state: Buffer.from(fullState),
+      updatedAt: new Date(),
+    },
+  },
+  {
+    upsert: true,
+    new: true,
+  },
+);
+        
+        
 
         /*
          * Get every browser connected to this document.
@@ -704,19 +897,10 @@ export const handleWebSocketConnection = (
               fullState,
             );
 
-            console.log(
-              `[SyncDoc] COMPLETE STATE sent to another client, bytes: ${fullState.byteLength}`,
-            );
+            
           }
         }
 
-        console.log(
-          `[SyncDoc] Server Yjs state successfully updated for document: ${documentId}`,
-        );
-
-        console.log(
-          "[SyncDoc] =======================================",
-        );
 
         return;
       }
@@ -740,6 +924,26 @@ export const handleWebSocketConnection = (
         socket,
       );
 
+const selections =
+  documentSelections.get(
+    documentId,
+  );
+
+if (selections) {
+  selections.delete(
+    presence.id,
+  );
+
+  if (selections.size === 0) {
+    documentSelections.delete(
+      documentId,
+    );
+  } else {
+    broadcastSelections(
+      documentId,
+    );
+  }
+}
       /*
        * Release all locks owned by this user.
        */
@@ -781,6 +985,14 @@ export const handleWebSocketConnection = (
       broadcastPresence(
         documentId,
       );
+      sendCurrentLocks(
+        socket,
+        documentId,
+);
+      sendCurrentSelections(
+  socket,
+  documentId,
+);
     },
   );
 };

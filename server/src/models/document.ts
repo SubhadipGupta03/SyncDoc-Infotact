@@ -1,4 +1,5 @@
 import { Schema, model } from "mongoose";
+import { sanitizeHtml } from "../security/sanitize";
 
 type AstNodeType =
   | "heading"
@@ -72,6 +73,9 @@ const traceBlockRelationships = (
     `Tracing AST block: ${path} (${node.type})`,
   );
 
+  if (node.type !== "code") {
+    node.content = sanitizeHtml(node.content);
+  }
   if (node.children.length === 0) {
     console.log(`Leaf block reached: ${path}`);
     return;
@@ -103,3 +107,4 @@ const SyncDocumentModel = model<SyncDocument>(
 );
 
 export default SyncDocumentModel;
+
