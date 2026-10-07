@@ -225,11 +225,58 @@ export const connectToDocument = (
       ? "wss:"
       : "ws:";
 
-  const socket = new WebSocket(
-    `${websocketProtocol}//${window.location.host}/ws?documentId=${encodeURIComponent(
-      documentId,
-    )}`,
-  );
+  const storedUser = sessionStorage.getItem(
+  "syncdoc_user",
+);
+
+const storedToken = sessionStorage.getItem(
+  "syncdoc_token",
+);
+
+let authenticatedUser: PresenceUser | null =
+  null;
+
+if (storedUser) {
+  try {
+    const parsedUser: unknown =
+      JSON.parse(storedUser);
+
+    if (
+      typeof parsedUser === "object" &&
+      parsedUser !== null &&
+      "id" in parsedUser &&
+      "name" in parsedUser &&
+      "email" in parsedUser &&
+      typeof parsedUser.id === "string" &&
+      typeof parsedUser.name === "string" &&
+      typeof parsedUser.email === "string"
+    ) {
+      authenticatedUser = {
+        id: parsedUser.id,
+        name: parsedUser.name,
+      };
+    }
+  } catch {
+    console.error(
+      "[SyncDoc] Invalid stored user data.",
+    );
+  }
+}
+
+const websocketUrl =
+  `${websocketProtocol}//${window.location.host}/ws` +
+  `?documentId=${encodeURIComponent(documentId)}` +
+  (storedToken
+    ? `&token=${encodeURIComponent(storedToken)}`
+    : "") +
+  (authenticatedUser
+    ? `&userId=${encodeURIComponent(authenticatedUser.id)}` +
+      `&userName=${encodeURIComponent(authenticatedUser.name)}`
+    : "");
+
+const socket = new WebSocket(
+  websocketUrl,
+);
 
   socket.binaryType = "arraybuffer";
 

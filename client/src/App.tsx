@@ -27,6 +27,11 @@ import {
 } from "./api/documents";
 import { exportDocumentToPdf } from "./pdfExporter";
 import {
+  login as loginUser,
+  signup as signupUser,
+} from "./api/auth";
+
+import {
   connectToDocument,
   type BlockLock,
   type BlockSelection,
@@ -98,10 +103,10 @@ function Header() {
           <Link className="login-link" to="/login" onClick={closeMenu}>
             Login
           </Link>
-          <Link className="get-started" to="/documents" onClick={closeMenu}>
-            Get Started
-            <ArrowRight size={16} strokeWidth={2.2} aria-hidden="true" />
-          </Link>
+          <Link className="get-started" to="/login" onClick={closeMenu}>
+  Get Started
+  <ArrowRight size={16} strokeWidth={2.2} aria-hidden="true" />
+</Link>
           <button
             className="theme-button"
             type="button"
@@ -125,6 +130,142 @@ function Header() {
   );
 }
 
+function AuthPage() {
+  const [isLogin, setIsLogin] = useState(true);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (
+    event: React.FormEvent<HTMLFormElement>,
+  ) => {
+    event.preventDefault();
+    setError(null);
+    setLoading(true);
+
+    try {
+      const result = isLogin
+        ? await loginUser(email, password)
+        : await signupUser(name, email, password);
+
+      if (result.token) {
+        sessionStorage.setItem("syncdoc_token", result.token);
+      }
+
+      sessionStorage.setItem(
+        "syncdoc_user",
+        JSON.stringify(result.user),
+      );
+
+      window.location.href = "/documents";
+    } catch (reason: unknown) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Authentication failed.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main className="auth-page">
+      <div className="auth-card">
+        <div className="auth-brand">SyncDoc</div>
+
+        <h1>
+          {isLogin
+            ? "Welcome back"
+            : "Create your account"}
+        </h1>
+
+        <p className="auth-subtitle">
+          {isLogin
+            ? "Sign in to continue to your workspace."
+            : "Create your SyncDoc workspace account."}
+        </p>
+
+        <form onSubmit={handleSubmit}>
+          {!isLogin && (
+            <label>
+              Name
+              <input
+                type="text"
+                value={name}
+                onChange={(event) =>
+                  setName(event.target.value)
+                }
+                placeholder="Your name"
+                required
+              />
+            </label>
+          )}
+
+          <label>
+            Email
+            <input
+              type="email"
+              value={email}
+              onChange={(event) =>
+                setEmail(event.target.value)
+              }
+              placeholder="you@example.com"
+              required
+            />
+          </label>
+
+          <label>
+            Password
+            <input
+              type="password"
+              value={password}
+              onChange={(event) =>
+                setPassword(event.target.value)
+              }
+              placeholder="At least 6 characters"
+              minLength={6}
+              required
+            />
+          </label>
+
+          {error && (
+            <p className="auth-error">
+              {error}
+            </p>
+          )}
+
+          <button
+            className="auth-submit"
+            type="submit"
+            disabled={loading}
+          >
+            {loading
+              ? "Please wait..."
+              : isLogin
+                ? "Login"
+                : "Create Account"}
+          </button>
+        </form>
+
+        <button
+          className="auth-switch"
+          type="button"
+          onClick={() => {
+            setIsLogin((current) => !current);
+            setError(null);
+          }}
+        >
+          {isLogin
+            ? "Don't have an account? Sign up"
+            : "Already have an account? Login"}
+        </button>
+      </div>
+    </main>
+  );
+}
 function DocumentsPage() {
   const [documents, setDocuments] = useState<ApiDocument[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -299,7 +440,7 @@ return () => {
   connectionRef.current = null;
 };
     
-  }, [documents, selectedId, selected, adapted]);
+  }, [selectedId]);
 
   
 
@@ -571,14 +712,19 @@ const handleDeleteDocument = async (documentId: string) => {
           <article className="document-content">
             <h2>{adapted?.title || "Untitled document"}</h2>
             
-             {blocks.map((block) => {
+         {blocks.map((block) => {
   const isEditing = editingBlockId === block.id;
-  const lockOwner = locks.find((lock) => lock.blockId === block.id);
+  const lockOwner = locks.find(
+    (lock) => lock.blockId === block.id,
+  );
+
   const isLockedByOther = Boolean(
     lockOwner &&
-    lockOwner.userId !== connectionRef.current?.currentUser?.id,
+    lockOwner.userId !==
+      connectionRef.current?.currentUser?.id,
   );
-  const remoteSelection = selections.find(
+
+  const remoteSelection = selections.find(    
   (selection) =>
     selection.blockId === block.id &&
     selection.userId !== connectionRef.current?.currentUser?.id,
@@ -671,56 +817,84 @@ onKeyUp={sendSelectionUpdate}
     return isEditing ? (
       <div key={block.id}>{editor}</div>
     ) : (
-      <h3
-        className={`document-section editable-block${isLockedByOther ? " block-locked" : ""}`}
-        onDoubleClick={() => startEditing(block.id)}
-        key={block.id}
-      >
-        {block.content}
-      </h3>
+      <div key={block.id}>
+  {isLockedByOther && lockOwner && (
+    <div className="block-lock-owner">
+      🔒 {lockOwner.userName} is editing this block
+    </div>
+  )}
+
+  <h3
+    className={`document-section editable-block${isLockedByOther ? " block-locked" : ""}`}
+    onDoubleClick={() => startEditing(block.id)}
+  >
+    {block.content}
+  </h3>
+</div>
     );
-  }
+}
 
   if (block.type === "heading") {
-    return isEditing ? (
-      <div key={block.id}>{editor}</div>
-    ) : (
-      <h4
-        className={`document-heading editable-block${isLockedByOther ? " block-locked" : ""}`}
-        onDoubleClick={() => startEditing(block.id)}
-        key={block.id}
-      >
-        {block.content}
-      </h4>
-    );
-  }
-
-  if (block.type === "code") {
-    return isEditing ? (
-      <div key={block.id}>{editor}</div>
-    ) : (
-      <pre
-        className={`document-code editable-block${isLockedByOther ? " block-locked" : ""}`}
-        onDoubleClick={() => startEditing(block.id)}
-        key={block.id}
-      >
-        <code>{block.content}</code>
-      </pre>
-    );
-  }
-
   return isEditing ? (
     <div key={block.id}>{editor}</div>
   ) : (
+    <div key={block.id}>
+      {isLockedByOther && lockOwner && (
+        <div className="block-lock-owner">
+          🔒 {lockOwner.userName} is editing this block
+        </div>
+      )}
+
+      <h4
+        className={`document-heading editable-block${isLockedByOther ? " block-locked" : ""}`}
+        onDoubleClick={() => startEditing(block.id)}
+      >
+        {block.content}
+      </h4>
+    </div>
+  );
+}
+
+  if (block.type === "code") {
+  return isEditing ? (
+    <div key={block.id}>{editor}</div>
+  ) : (
+    <div key={block.id}>
+      {isLockedByOther && lockOwner && (
+        <div className="block-lock-owner">
+          🔒 {lockOwner.userName} is editing this block
+        </div>
+      )}
+
+      <pre
+        className={`document-code editable-block${isLockedByOther ? " block-locked" : ""}`}
+        onDoubleClick={() => startEditing(block.id)}
+      >
+        <code>{block.content}</code>
+      </pre>
+    </div>
+  );
+}
+return isEditing ? (
+  <div key={block.id}>{editor}</div>
+) : (
+  <div key={block.id}>
+    {isLockedByOther && lockOwner && (
+      <div className="block-lock-owner">
+        🔒 {lockOwner.userName} is editing this block
+      </div>
+    )}
+
     <p
       className={`document-paragraph editable-block${isLockedByOther ? " block-locked" : ""}${remoteSelection ? " remote-selected" : ""}`}
       onDoubleClick={() => startEditing(block.id)}
-      key={block.id}
     >
       {block.content}
     </p>
-  );
+  </div>
+);
 })}
+  
           </article>
         </section>
       </div>
@@ -801,12 +975,26 @@ function HomePage() {
 }
 
 function AppRoutes() {
+  const token = sessionStorage.getItem("syncdoc_token");
+
   return (
     <>
       <Header />
       <Routes>
         <Route path="/" element={<HomePage />} />
-        <Route path="/documents" element={<DocumentsPage />} />
+        <Route path="/login" element={<AuthPage />} />
+
+        <Route
+          path="/documents"
+          element={
+            token ? (
+              <DocumentsPage />
+            ) : (
+              <AuthPage />
+            )
+          }
+        />
+
         <Route path="*" element={<HomePage />} />
       </Routes>
     </>

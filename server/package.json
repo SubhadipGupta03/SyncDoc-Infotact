@@ -14,10 +14,12 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
+    "bcryptjs": "^3.0.3",
     "dompurify": "^3.4.16",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "jsdom": "^29.1.1",
+    "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.9.4",
     "pdfkit": "^0.20.2",
     "ws": "^8.21.3",
@@ -26,6 +28,7 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/jsdom": "^30.0.0",
+    "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^26.4.1",
     "@types/pdfkit": "^0.17.6",
     "@types/ws": "^8.18.1",

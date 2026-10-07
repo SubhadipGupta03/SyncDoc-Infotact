@@ -143,7 +143,18 @@ export const createDocument = async (
         nodes: [
   {
     type: "paragraph",
-    content: "Start writing your document here...",
+    content:
+      "This document demonstrates collaborative block editing.",
+  },
+  {
+    type: "paragraph",
+    content:
+      "AST conflict resolution preserves structural changes.",
+  },
+  {
+    type: "paragraph",
+    content:
+      "Real-time synchronization uses Yjs.",
   },
 ],
       }),

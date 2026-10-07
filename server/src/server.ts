@@ -1,5 +1,9 @@
 import connectDatabase from "./config/database.js";
 import SyncDocumentModel from "./models/document.js";
+import {
+  signup,
+  login,
+} from "./auth/auth.js";
 import express, {
   type Express,
   type Request,
@@ -7,6 +11,7 @@ import express, {
 } from "express";
 import { createServer } from "node:http";
 import { WebSocketServer } from "ws";
+import jwt from "jsonwebtoken";
 import { handleWebSocketConnection } from "./collaboration/websocketSync.js";
 import {transformAstToPdf,
   type PdfDocumentInput,
@@ -39,6 +44,8 @@ app.use((req: Request, res: Response, next) => {
 });
 
 app.use(express.json());
+app.post("/auth/signup", signup);
+app.post("/auth/login", login);
 
 app.post(
   "/documents/pdf",
@@ -164,14 +171,69 @@ webSocketServer.on("connection", (socket, request) => {
     `http://${request.headers.host ?? "localhost"}`,
   );
 
-  const documentId = requestUrl.searchParams.get("documentId");
+  const documentId =
+    requestUrl.searchParams.get("documentId");
+
+  const token =
+    requestUrl.searchParams.get("token");
 
   if (!documentId) {
-    socket.close(1008, "documentId is required");
+    socket.close(
+      1008,
+      "documentId is required",
+    );
     return;
   }
 
-  handleWebSocketConnection(socket, documentId);
+  if (!token) {
+    socket.close(
+      1008,
+      "authentication required",
+    );
+    return;
+  }
+
+  const JWT_SECRET =
+    process.env.JWT_SECRET ??
+    "syncdoc-development-secret";
+
+  try {
+    const decoded = jwt.verify(
+      token,
+      JWT_SECRET,
+    );
+
+    if (
+      typeof decoded !== "object" ||
+      decoded === null ||
+      !("userId" in decoded) ||
+      !("name" in decoded) ||
+      !("email" in decoded) ||
+      typeof decoded.userId !== "string" ||
+      typeof decoded.name !== "string" ||
+      typeof decoded.email !== "string"
+    ) {
+      socket.close(
+        1008,
+        "invalid authentication",
+      );
+      return;
+    }
+
+    handleWebSocketConnection(
+      socket,
+      documentId,
+      {
+        id: decoded.userId,
+        name: decoded.name,
+      },
+    );
+  } catch {
+    socket.close(
+      1008,
+      "invalid or expired token",
+    );
+  }
 });
 
 const startServer = async (): Promise<void> => {

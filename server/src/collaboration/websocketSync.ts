@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import * as Y from "yjs";
 import type { RawData, WebSocket } from "ws";
 import {getYDoc,loadYDocFromDatabase,} from "./yjsDocumentManager.js";
@@ -541,6 +540,7 @@ export const handleWebSocketConnection =  async (
 
   socket: WebSocket,
   documentId: string,
+   authenticatedUser: PresenceUser,
 ):Promise<void> => {
   
   /*
@@ -577,20 +577,13 @@ await loadYDocFromDatabase(
   /*
    * Create presence identity.
    */
-  const clientId = randomUUID();
+  const presence: PresenceUser =
+  authenticatedUser;
 
-  const presence: PresenceUser = {
-    id: clientId,
-    name: `User ${clientId.slice(
-      0,
-      4,
-    )}`,
-  };
-
-  clientPresence.set(
-    socket,
-    presence,
-  );
+clientPresence.set(
+  socket,
+  presence,
+);
 
   /*
    * Tell the browser that the connection
